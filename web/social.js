@@ -1,4 +1,7 @@
+import {mountCityPicker} from './city-picker.js';
+
 const $ = (id) => document.getElementById(id);
+const MAX_PHOTOS = 3;
 const escapeHTML = (value) => String(value ?? '').replace(/[&<>"']/g, (c) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const jsonOptions = (method, body) => ({method, headers:{'Content-Type':'application/json'}, body:JSON.stringify(body)});
 const codePath = (value) => encodeURIComponent(String(value));
@@ -18,6 +21,7 @@ export function initSocial(app) {
   if (!friendsPanel || !feedPanel || !drawer) throw new Error('社交页面容器未就绪');
   let friendsData = {friends:[],incoming:[],outgoing:[]};
   let activeCity = null;
+  let drawerTrigger = null;
   let cityGeneration = 0;
   let friendsGeneration = 0;
   let comparisonGeneration = 0;
@@ -28,8 +32,8 @@ export function initSocial(app) {
   let friendsLoading = false;
   let postsLoading = false;
   let postsRequestId = 0;
-  let photoFile = null;
-  let photoURL = '';
+  let photos = [];
+  let cityPicker = null;
   let photoGeneration = 0;
   let photoLoading = false;
   let posting = false;
@@ -146,7 +150,9 @@ export function initSocial(app) {
   }
 
   function renderFeedIntro() {
-    feedPanel.innerHTML = `<section class="social-section"><span class="social-kicker">EVERY CITY, A STORY</span><h2>把故事留在地图上</h2><p class="social-intro">走过的街道、喜欢的光线，<br>还有那天想记下的话。</p><p class="social-help">在地图上选择一座城市，查看照片与随笔。登录后可以发布自己的记录、回复评论。</p><label class="social-field"><span>直接前往一座城市</span><select id="storyCitySelect"><option value="">选择城市</option>${app.getCities().map((city) => `<option value="${escapeHTML(city.code)}">${escapeHTML(city.name)}</option>`).join('')}</select></label>${button('打开城市故事','open-story','','social-primary')}<div class="social-feed-notes"><p><span>01</span> 选中城市，打开城市故事</p><p><span>02</span> 上传照片，写下此刻的心情</p><p><span>03</span> 选择公开或好友可见，听听大家的回应</p></div></section>`;
+    cityPicker?.destroy();
+    feedPanel.innerHTML = `<section class="social-section"><span class="social-kicker">EVERY CITY, A STORY</span><h2>这一站，去哪里？</h2><p class="social-help">选省份找城市，或直接搜索。也可以点击地图，打开那里的照片与随笔。</p><div id="storyCityPicker"></div><div class="social-feed-notes"><p><span>01</span> 点选城市，翻开当地的故事</p><p><span>02</span> 添加最多 3 张照片，写下旅途随笔</p><p><span>03</span> 选择公开或好友可见，听听大家的回应</p></div></section>`;
+    cityPicker = mountCityPicker($('storyCityPicker'),{cities:app.getCities(),provinces:app.getProvinces(),onSelect:openCity});
   }
 
   function saveCityDraft() {
@@ -158,10 +164,9 @@ export function initSocial(app) {
 
   function clearPhoto() {
     photoGeneration++;
-    photoFile = null;
     photoLoading = false;
-    if (photoURL) URL.revokeObjectURL(photoURL);
-    photoURL = '';
+    photos.forEach((photo) => URL.revokeObjectURL(photo.url));
+    photos = [];
   }
 
   function renderDrawer() {
@@ -170,14 +175,23 @@ export function initSocial(app) {
     drawer.classList.add('social-drawer-open');
     drawer.setAttribute('role','region');
     drawer.setAttribute('aria-label', `${activeCity.name}的城市故事`);
-    drawer.innerHTML = `<div class="social-drawer-head"><div><span class="social-kicker">CITY STORIES</span><h2>${escapeHTML(activeCity.name)}</h2><p>在这里，收藏一段旅程</p></div>${button('×','close-drawer','','social-close')}</div><div class="social-drawer-scroll"><section class="social-composer">${signedIn() ? `<form id="postForm"><label class="sr-only" for="postText">写一段城市随笔</label><textarea id="postText" name="text" rows="4" maxlength="5000" placeholder="这一站，什么让你念念不忘？">${escapeHTML(draft.text)}</textarea><div id="photoPreview" class="social-photo-preview" hidden></div><div class="social-composer-tools"><label class="social-button social-photo-label"><span>＋ 添加照片</span><input id="postPhoto" type="file" accept="image/jpeg,image/png,image/webp" class="sr-only"></label><label class="sr-only" for="postVisibility">谁可以看见</label><select id="postVisibility" name="visibility"><option value="friends"${draft.visibility === 'friends' ? ' selected' : ''}>好友可见</option><option value="public"${draft.visibility === 'public' ? ' selected' : ''}>所有访客可见</option></select></div><div class="social-composer-bottom"><small>照片会自动压缩 · 支持 JPG / PNG / WebP</small><button type="submit" class="social-button social-primary">发布记录</button></div><p id="postFormError" class="social-error" role="alert" hidden></p></form>` : `<div class="social-login-note"><p>登录后，为这座城市留下你的照片与随笔。</p>${signIn}</div>`}</section><div class="social-posts-header"><h3>城市记录 <span id="postCount"></span></h3>${button('刷新','refresh-posts','','social-subtle')}</div><p id="postsError" class="social-error" role="alert" hidden></p><div id="cityPosts" aria-live="polite"><p class="social-loading">正在翻开这座城市的故事…</p></div></div>`;
+    drawer.innerHTML = `<div class="social-drawer-head"><div><span class="social-kicker">CITY STORIES</span><h2>${escapeHTML(activeCity.name)}</h2><p>在这里，收藏一段旅程</p></div>${button('×','close-drawer','','social-close')}</div><div class="social-drawer-scroll"><section class="social-composer">${signedIn() ? `<form id="postForm"><label class="sr-only" for="postText">写一段城市随笔</label><textarea id="postText" name="text" rows="4" maxlength="5000" placeholder="这一站，什么让你念念不忘？">${escapeHTML(draft.text)}</textarea><div id="photoPreview" class="social-photo-preview" hidden></div><div class="social-composer-tools"><label class="social-button social-photo-label"><span id="photoAddLabel">＋ 添加照片</span><input id="postPhoto" type="file" accept="image/jpeg,image/png,image/webp" multiple aria-describedby="photoCount" class="sr-only"></label><label class="sr-only" for="postVisibility">谁可以看见</label><select id="postVisibility" name="visibility"><option value="friends"${draft.visibility === 'friends' ? ' selected' : ''}>好友可见</option><option value="public"${draft.visibility === 'public' ? ' selected' : ''}>所有访客可见</option></select></div><p id="photoCount" class="social-photo-count" role="status">已选 0 / 3 张 · 每条记录最多 3 张</p><div class="social-composer-bottom"><small>自动压缩 · JPG / PNG / WebP</small><button type="submit" class="social-button social-primary">发布记录</button></div><p id="postFormError" class="social-error" role="alert" hidden></p></form>` : `<div class="social-login-note"><p>登录后，为这座城市留下你的照片与随笔。</p>${signIn}</div>`}</section><div class="social-posts-header"><h3>城市记录 <span id="postCount"></span></h3>${button('刷新','refresh-posts','','social-subtle')}</div><p id="postsError" class="social-error" role="alert" hidden></p><div id="cityPosts" aria-live="polite"><p class="social-loading">正在翻开这座城市的故事…</p></div></div>`;
     drawer.querySelector('.social-close').setAttribute('aria-label','关闭城市故事');
+    if (posting && $('postForm')) {
+      Array.from($('postForm').elements).forEach((field) => { field.disabled = true; });
+      $('postForm').querySelector('[type="submit"]').textContent = '正在发布…';
+    }
   }
 
   function openCity(city) {
     const resolved = typeof city === 'string' ? app.getCities().find((item) => item.code === city) : city;
     if (!resolved?.code) return;
     if (posting) { app.notify('记录正在发布，请稍候。'); return; }
+    if (activeCity?.code === String(resolved.code) && !drawer.hidden) {
+      drawer.querySelector('.social-drawer-head h2')?.focus({preventScroll:true});
+      return;
+    }
+    if (!drawer.contains(document.activeElement)) drawerTrigger = document.activeElement;
     saveCityDraft();
     clearPhoto();
     activeCity = {code:String(resolved.code),name:resolved.name || resolved.code};
@@ -186,6 +200,9 @@ export function initSocial(app) {
     nextBefore = null;
     loadedOlder = false;
     renderDrawer();
+    const heading = drawer.querySelector('.social-drawer-head h2');
+    heading.tabIndex = -1;
+    heading.focus({preventScroll:true});
     refreshPosts();
   }
 
@@ -197,6 +214,7 @@ export function initSocial(app) {
     cityGeneration++;
     drawer.hidden = true;
     drawer.classList.remove('social-drawer-open');
+    if (drawerTrigger?.isConnected) drawerTrigger.focus({preventScroll:true});
   }
 
   function safePhotoURL(url) {
@@ -218,8 +236,8 @@ export function initSocial(app) {
       return;
     }
     root.innerHTML = posts.map((post) => {
-      const photo = safePhotoURL(post.photoUrl);
-      return `<article class="social-post" data-post-id="${escapeHTML(post.id)}"><header class="social-post-head"><span class="social-avatar">${escapeHTML(initials(post.author?.name))}</span><div class="social-person-body"><strong>${escapeHTML(post.author?.name || '旅人')}</strong><small>${escapeHTML(timeLabel(post.createdAt))} · ${post.visibility === 'public' ? '公开' : '好友可见'}</small></div>${user?.id === post.author?.id ? button('删除','delete-post',post.id,'social-subtle') : ''}</header>${photo ? `<a class="social-post-photo-link" href="${escapeHTML(photo)}" target="_blank" rel="noopener"><img class="social-post-photo" loading="lazy" src="${escapeHTML(photo)}" alt="${escapeHTML(post.author?.name || '旅人')}分享的${escapeHTML(activeCity.name)}照片"></a>` : ''}${post.text ? `<p class="social-post-text">${escapeHTML(post.text)}</p>` : ''}<div class="social-comments">${(post.comments || []).map((comment) => `<div class="social-comment"><div class="social-comment-line"><strong>${escapeHTML(comment.author?.name || '旅人')}</strong><time>${escapeHTML(timeLabel(comment.createdAt))}</time>${user?.id === comment.author?.id ? button('删除','delete-comment',comment.id,'social-subtle') : ''}</div><p>${escapeHTML(comment.text)}</p></div>`).join('')}${signedIn() ? `<form class="social-comment-form" data-post="${escapeHTML(post.id)}"><label class="sr-only" for="comment-${escapeHTML(post.id)}">评论这条城市记录</label><input id="comment-${escapeHTML(post.id)}" name="comment" value="${escapeHTML(drafts.get(post.id) || '')}" maxlength="1000" placeholder="留下你的回应…" required><button type="submit" class="social-button">发送</button></form>` : `<p class="social-help">${signIn} 后参与评论</p>`}</div></article>`;
+      const photoURLs = (Array.isArray(post.photos) ? post.photos.map((photo) => photo.url) : [post.photoUrl]).map(safePhotoURL).filter(Boolean).slice(0,MAX_PHOTOS);
+      return `<article class="social-post" data-post-id="${escapeHTML(post.id)}"><header class="social-post-head"><span class="social-avatar">${escapeHTML(initials(post.author?.name))}</span><div class="social-person-body"><strong>${escapeHTML(post.author?.name || '旅人')}</strong><small>${escapeHTML(timeLabel(post.createdAt))} · ${post.visibility === 'public' ? '公开' : '好友可见'}</small></div>${user?.id === post.author?.id ? button('删除','delete-post',post.id,'social-subtle') : ''}</header>${photoURLs.length ? `<div class="social-post-gallery" data-count="${photoURLs.length}">${photoURLs.map((photo,index) => `<a class="social-post-photo-link" href="${escapeHTML(photo)}" target="_blank" rel="noopener" aria-label="查看第 ${index + 1} 张照片，共 ${photoURLs.length} 张"><img class="social-post-photo" loading="lazy" src="${escapeHTML(photo)}" alt="${escapeHTML(post.author?.name || '旅人')}分享的${escapeHTML(activeCity.name)}照片 ${index + 1}"></a>`).join('')}</div>` : ''}${post.text ? `<p class="social-post-text">${escapeHTML(post.text)}</p>` : ''}<div class="social-comments">${(post.comments || []).map((comment) => `<div class="social-comment"><div class="social-comment-line"><strong>${escapeHTML(comment.author?.name || '旅人')}</strong><time>${escapeHTML(timeLabel(comment.createdAt))}</time>${user?.id === comment.author?.id ? button('删除','delete-comment',comment.id,'social-subtle') : ''}</div><p>${escapeHTML(comment.text)}</p></div>`).join('')}${signedIn() ? `<form class="social-comment-form" data-post="${escapeHTML(post.id)}"><label class="sr-only" for="comment-${escapeHTML(post.id)}">评论这条城市记录</label><input id="comment-${escapeHTML(post.id)}" name="comment" value="${escapeHTML(drafts.get(post.id) || '')}" maxlength="1000" placeholder="留下你的回应…" required><button type="submit" class="social-button">发送</button></form>` : `<p class="social-help">${signIn} 后参与评论</p>`}</div></article>`;
     }).join('') + (nextBefore ? `<div class="social-more-posts">${button('加载更早的记录','load-more-posts')}${loadedOlder ? '<p class="social-help">已展开历史记录，点击上方「刷新」查看最新动态。</p>' : ''}</div>` : (loadedOlder ? '<p class="social-help social-history-end">已显示全部记录。点击上方「刷新」查看最新动态。</p>' : ''));
   }
 
@@ -293,18 +311,24 @@ export function initSocial(app) {
     } finally { URL.revokeObjectURL(objectURL); }
   }
 
-  async function choosePhoto(file) {
-    clearPhoto();
-    if (!file) { renderPhotoPreview(); return; }
+  async function choosePhotos(files) {
+    if (!files.length || photoLoading || posting) return;
+    if (photos.length + files.length > MAX_PHOTOS) {
+      showError($('postFormError'),`每条记录最多 ${MAX_PHOTOS} 张照片。已选 ${photos.length} 张，还可以添加 ${MAX_PHOTOS - photos.length} 张。`);
+      return;
+    }
     const generation = ++photoGeneration;
     photoLoading = true;
+    showError($('postFormError'),'');
     renderPhotoPreview();
     try {
-      const prepared = await preparePhoto(file);
-      if (generation !== photoGeneration || !activeCity || destroyed) return;
-      photoFile = prepared;
-      photoURL = URL.createObjectURL(prepared);
-      showError($('postFormError'),'');
+      const prepared = [];
+      // A failed batch leaves previously selected photos intact.
+      for (const file of files) {
+        prepared.push(await preparePhoto(file));
+        if (generation !== photoGeneration || !activeCity || destroyed) return;
+      }
+      photos.push(...prepared.map((file) => ({id:crypto.randomUUID(),file,url:URL.createObjectURL(file)})));
     } catch (error) {
       if (generation === photoGeneration) showError($('postFormError'),errorLabel(error));
     } finally {
@@ -315,8 +339,13 @@ export function initSocial(app) {
   function renderPhotoPreview() {
     const preview = $('photoPreview');
     if (!preview) return;
-    preview.hidden = !photoFile && !photoLoading;
-    preview.innerHTML = photoLoading ? '<p class="social-loading">正在整理照片…</p>' : photoFile ? `<img src="${escapeHTML(photoURL)}" alt="即将发布的照片预览">${button('移除照片','remove-photo','','social-photo-remove')}<small>${Math.round(photoFile.size / 1024)} KB · 已压缩</small>` : '';
+    preview.hidden = !photos.length && !photoLoading;
+    preview.innerHTML = photos.map((photo,index) => `<div class="social-photo-item"><img src="${escapeHTML(photo.url)}" alt="待发布的第 ${index + 1} 张照片"><button type="button" class="social-button social-photo-remove" data-action="remove-photo" data-id="${photo.id}" aria-label="移除第 ${index + 1} 张照片"${photoLoading || posting ? ' disabled' : ''}>×</button><small>${Math.round(photo.file.size / 1024)} KB</small></div>`).join('') + (photoLoading ? '<p class="social-loading" role="status">正在整理照片…</p>' : '');
+    $('photoCount').textContent = `已选 ${photos.length} / ${MAX_PHOTOS} 张${photos.length === MAX_PHOTOS ? ' · 已达上限，可移除后更换' : ' · 每条记录最多 3 张'}`;
+    const input = $('postPhoto');
+    input.disabled = photos.length >= MAX_PHOTOS || photoLoading || posting;
+    input.closest('label').classList.toggle('is-disabled',input.disabled);
+    $('photoAddLabel').textContent = photoLoading ? '正在处理…' : photos.length >= MAX_PHOTOS ? '已选满 3 张' : '＋ 添加照片';
     const submit = $('postForm')?.querySelector('[type="submit"]');
     if (submit) submit.disabled = photoLoading || posting;
   }
@@ -324,10 +353,10 @@ export function initSocial(app) {
   async function postStory(form) {
     if (posting || photoLoading || !activeCity) return;
     const text = form.elements.text.value.trim();
-    if (!text && !photoFile) { showError($('postFormError'),'写一段随笔，或添加一张照片。'); return; }
+    if (!text && !photos.length) { showError($('postFormError'),'写一段随笔，或添加照片。'); return; }
     posting = true;
     const code = activeCity.code;
-    const generation = cityGeneration;
+    const authorId = accountUser()?.id;
     const submit = form.querySelector('[type="submit"]');
     Array.from(form.elements).forEach((field) => { field.disabled = true; });
     submit.textContent = '正在发布…';
@@ -337,24 +366,28 @@ export function initSocial(app) {
       data.set('city',code);
       data.set('text',text);
       data.set('visibility',form.elements.visibility.value);
-      if (photoFile) data.set('photo',photoFile);
+      photos.forEach((photo) => data.append('photo',photo.file));
       await app.api('/api/posts',{method:'POST',body:data});
-      cityDrafts.delete(code);
-      if (generation === cityGeneration) {
-        form.elements.text.value = '';
-        clearPhoto();
-        form.querySelector('[type="file"]').value = '';
-        renderPhotoPreview();
-        await refreshPosts();
+      if (!destroyed && accountUser()?.id === authorId) {
+        cityDrafts.delete(code);
+        if (activeCity?.code === code) {
+          const currentForm = $('postForm');
+          currentForm.elements.text.value = '';
+          clearPhoto();
+          currentForm.querySelector('[type="file"]').value = '';
+          renderPhotoPreview();
+          await refreshPosts();
+        }
       }
       app.notify('城市记录已发布。');
     } catch (error) { showError($('postFormError'),errorLabel(error)); }
     finally {
       posting = false;
-      if (submit.isConnected) {
-        Array.from(form.elements).forEach((field) => { field.disabled = false; });
-        submit.disabled = photoLoading;
-        submit.textContent = '发布记录';
+      const currentForm = !destroyed && $('postForm');
+      if (currentForm) {
+        Array.from(currentForm.elements).forEach((field) => { field.disabled = false; });
+        currentForm.querySelector('[type="submit"]').textContent = '发布记录';
+        renderPhotoPreview();
       }
     }
   }
@@ -409,7 +442,15 @@ export function initSocial(app) {
     else if (action === 'close-drawer') closeDrawer();
     else if (action === 'refresh-posts') await runButton(target,() => refreshPosts());
     else if (action === 'load-more-posts') await runButton(target,loadMorePosts);
-    else if (action === 'remove-photo') { clearPhoto(); $('postPhoto').value = ''; renderPhotoPreview(); }
+    else if (action === 'remove-photo' && !photoLoading && !posting) {
+      const removed = photos.find((photo) => photo.id === id);
+      if (removed) URL.revokeObjectURL(removed.url);
+      photos = photos.filter((photo) => photo.id !== id);
+      $('postPhoto').value = '';
+      showError($('postFormError'),'');
+      renderPhotoPreview();
+      $('postPhoto').focus();
+    }
     else if (action === 'delete-post') {
       if (!window.confirm('删除这条城市记录及其评论？')) return;
       await runButton(target,async () => { await app.api(`/api/posts/${codePath(id)}`,{method:'DELETE'}); await refreshPosts(); app.notify('城市记录已删除。'); });
@@ -436,15 +477,12 @@ export function initSocial(app) {
     }
   }
 
-  function handleFeedClick(event) {
-    if (event.target.closest('[data-action="open-story"]')) {
-      const code = $('storyCitySelect').value;
-      if (code) openCity(code); else app.notify('先选择一座城市。');
-    }
-  }
-
   function handleDrawerChange(event) {
-    if (event.target.id === 'postPhoto') choosePhoto(event.target.files[0]);
+    if (event.target.id === 'postPhoto') {
+      const files = Array.from(event.target.files);
+      event.target.value = '';
+      choosePhotos(files);
+    }
     else if (event.target.id === 'postVisibility') saveCityDraft();
   }
   function handleDrawerInput(event) { if (event.target.id === 'postText') saveCityDraft(); }
@@ -469,7 +507,7 @@ export function initSocial(app) {
   }
   function mapChanged() {
     if (comparison) renderComparisonResult();
-    if (!$('storyCitySelect')?.options.length || $('storyCitySelect').options.length <= 1) renderFeedIntro();
+    if (!cityPicker) renderFeedIntro();
   }
   friendsPanel.addEventListener('click',handleFriendsClick);
   friendsPanel.addEventListener('submit',handleFriendsSubmit);
@@ -477,7 +515,6 @@ export function initSocial(app) {
   drawer.addEventListener('submit',handleDrawerSubmit);
   drawer.addEventListener('change',handleDrawerChange);
   drawer.addEventListener('input',handleDrawerInput);
-  feedPanel.addEventListener('click',handleFeedClick);
   window.addEventListener('keydown',handleEscape);
   window.addEventListener('account-ready',accountReady);
   window.addEventListener('map-state-changed',mapChanged);
@@ -502,6 +539,7 @@ export function initSocial(app) {
       friendsGeneration++;
       comparisonGeneration++;
       clearPhoto();
+      cityPicker?.destroy();
       timers.forEach(clearInterval);
       friendsPanel.removeEventListener('click',handleFriendsClick);
       friendsPanel.removeEventListener('submit',handleFriendsSubmit);
@@ -509,7 +547,6 @@ export function initSocial(app) {
       drawer.removeEventListener('submit',handleDrawerSubmit);
       drawer.removeEventListener('change',handleDrawerChange);
       drawer.removeEventListener('input',handleDrawerInput);
-      feedPanel.removeEventListener('click',handleFeedClick);
       window.removeEventListener('keydown',handleEscape);
       window.removeEventListener('account-ready',accountReady);
       window.removeEventListener('map-state-changed',mapChanged);

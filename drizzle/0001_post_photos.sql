@@ -1,0 +1,1 @@
+ALTER TABLE `posts` ADD `photos_json` text;

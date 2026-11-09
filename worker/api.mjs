@@ -2,6 +2,7 @@
 // server-side session and return {id, name}; client-supplied IDs are never trusted.
 const JSON_LIMIT = 256 * 1024;
 const PHOTO_LIMIT = 5 * 1024 * 1024;
+const PHOTO_COUNT_LIMIT = 3;
 const CITY = /^\d{6}$/;
 const COLOR = /^#[\da-f]{6}$/i;
 const ID = /^[a-zA-Z0-9_-]{1,100}$/;
@@ -109,11 +110,22 @@ async function readablePost(env, id, actor) {
   if (!post || !(post.author_id === actor || post.visibility === 'public' || await areFriends(env, post.author_id, actor))) fail(404, '内容不存在或暂不可见', 'not_found');
   return post;
 }
+function postPhotos(post) {
+  if (post.photos_json != null) return JSON.parse(post.photos_json);
+  return post.photo_key ? [{ key: post.photo_key, type: post.photo_type }] : [];
+}
+async function removePhotoObjects(env, keys) {
+  if (!keys.length || !env.BUCKET) return;
+  const results = await Promise.allSettled([...new Set(keys)].map(async key => env.BUCKET.delete(key)));
+  const failures = results.filter(result => result.status === 'rejected');
+  if (failures.length) throw new Error(`Failed to remove ${failures.length} photo object(s)`);
+}
 async function postView(env, post) {
   const comments = await all(env, 'SELECT c.*, u.name AS author_name FROM comments c JOIN users u ON u.id = c.author_id WHERE c.post_id = ? ORDER BY c.created_at ASC LIMIT 100', post.id);
+  const photos = postPhotos(post).map((_, index) => ({ url: `/api/photos/${post.id}/${index}` }));
   return {
     id: post.id, city: post.city, author: { id: post.author_id, name: post.author_name },
-    text: post.text, photoUrl: post.photo_key ? `/api/photos/${post.id}` : null,
+    text: post.text, photos, photoUrl: photos.length ? `/api/photos/${post.id}` : null,
     visibility: post.visibility, createdAt: post.created_at,
     comments: comments.map(c => ({ id: c.id, author: { id: c.author_id, name: c.author_name }, text: c.text, createdAt: c.created_at }))
   };
@@ -138,7 +150,7 @@ export async function api(request, env, resolveIdentity = null) {
     verifyOrigin(request);
     const path = url.pathname;
     const method = request.method;
-    const publicRead = method === 'GET' && (path === '/api/posts' || /^\/api\/photos\/[^/]+$/.test(path));
+    const publicRead = method === 'GET' && (path === '/api/posts' || /^\/api\/photos\/[^/]+(?:\/[^/]+)?$/.test(path));
     const actor = await resolveUser(request, env, resolveIdentity, publicRead) || { id: '' };
     if (path === '/api/me' && method === 'GET') return json({ user: userView(actor), ...await stateFor(env, actor.id) });
     if (path === '/api/profile' && method === 'GET') return json({ user: userView(actor) });
@@ -225,7 +237,7 @@ export async function api(request, env, resolveIdentity = null) {
       await rateLimit(env, 'posts', actor.id, 40);
       const type = request.headers.get('content-type') || '';
       if (!type.toLowerCase().startsWith('multipart/form-data')) fail(415, '请使用照片随笔表单');
-      const bytes = await bodyBytes(request, PHOTO_LIMIT + 64 * 1024);
+      const bytes = await bodyBytes(request, PHOTO_LIMIT * PHOTO_COUNT_LIMIT + 64 * 1024);
       let form;
       try { form = await new Response(bytes, { headers: { 'content-type': type } }).formData(); } catch { fail(400, '表单格式不正确'); }
       const city = form.get('city');
@@ -234,20 +246,32 @@ export async function api(request, env, resolveIdentity = null) {
       const text = textField(form.get('text') || '', 5000, '随笔', true);
       const visibility = form.get('visibility');
       if (!['public', 'friends'].includes(visibility)) fail(400, '请选择公开或好友可见');
-      const photo = form.get('photo');
-      let photoBytes = null, mime = null;
-      if (photo && typeof photo !== 'string' && photo.size > 0) {
-        if (photo.size > PHOTO_LIMIT) fail(413, '照片最大 5 MB');
-        if (!env.BUCKET) fail(503, '照片存储尚未连接');
-        photoBytes = new Uint8Array(await photo.arrayBuffer());
-        mime = photoType(photoBytes);
+      const uploads = form.getAll('photo');
+      if (uploads.length > PHOTO_COUNT_LIMIT) fail(400, '每条记录最多上传 3 张照片', 'too_many_photos');
+      const photos = [];
+      for (const photo of uploads) {
+        if (typeof photo === 'string' || !photo.size) fail(400, '请上传有效的照片文件');
+        if (photo.size > PHOTO_LIMIT) fail(413, '每张照片最大 5 MB');
+        const photoBytes = new Uint8Array(await photo.arrayBuffer());
+        photos.push({ bytes: photoBytes, type: photoType(photoBytes) });
       }
-      if (!text && !photoBytes) fail(400, '请添加照片或写下一段随笔');
-      const id = uuid(), photoKey = photoBytes ? `photos/${id}` : null;
-      if (photoKey) await env.BUCKET.put(photoKey, photoBytes, { httpMetadata: { contentType: mime } });
+      if (!text && !photos.length) fail(400, '请添加照片或写下一段随笔');
+      if (photos.length && !env.BUCKET) fail(503, '照片存储尚未连接');
+      const id = uuid();
+      const metadata = photos.map((photo, index) => ({ key: `photos/${id}/${index}`, type: photo.type }));
+      const attemptedKeys = [];
       try {
-        await run(env, 'INSERT INTO posts(id, city, author_id, text, photo_key, photo_type, visibility, created_at) VALUES(?, ?, ?, ?, ?, ?, ?, ?)', id, city, actor.id, text, photoKey, mime, visibility, now());
-      } catch (error) { if (photoKey) await env.BUCKET.delete(photoKey); throw error; }
+        for (let index = 0; index < photos.length; index++) {
+          attemptedKeys.push(metadata[index].key);
+          await env.BUCKET.put(metadata[index].key, photos[index].bytes, { httpMetadata: { contentType: photos[index].type } });
+        }
+        await run(env, 'INSERT INTO posts(id, city, author_id, text, photo_key, photo_type, photos_json, visibility, created_at) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)', id, city, actor.id, text, metadata[0]?.key || null, metadata[0]?.type || null, JSON.stringify(metadata), visibility, now());
+      } catch (error) {
+        // Include the failed PUT key: object storage may have accepted its bytes
+        // before the connection failed. Attempt every cleanup even if one fails.
+        try { await removePhotoObjects(env, attemptedKeys); } catch { console.error('Photo upload cleanup failed'); }
+        throw error;
+      }
       return json({ post: await postView(env, await readablePost(env, id, actor.id)) }, 201);
     }
     match = path.match(/^\/api\/posts\/([^/]+)\/comments$/);
@@ -264,14 +288,14 @@ export async function api(request, env, resolveIdentity = null) {
     }
     match = path.match(/^\/api\/posts\/([^/]+)$/);
     if (match && method === 'DELETE') {
-      const post = await first(env, 'SELECT id, photo_key FROM posts WHERE id = ? AND author_id = ?', match[1], actor.id);
+      const post = await first(env, 'SELECT id, photo_key, photo_type, photos_json FROM posts WHERE id = ? AND author_id = ?', match[1], actor.id);
       if (!post) fail(404, '随笔不存在或无权删除');
       // SQL deletion first immediately revokes photo access, even if bucket cleanup fails.
       await env.DB.batch([
         env.DB.prepare('DELETE FROM comments WHERE post_id = ?').bind(post.id),
         env.DB.prepare('DELETE FROM posts WHERE id = ? AND author_id = ?').bind(post.id, actor.id)
       ]);
-      if (post.photo_key && env.BUCKET) await env.BUCKET.delete(post.photo_key);
+      await removePhotoObjects(env, postPhotos(post).map(photo => photo.key));
       return json({ ok: true });
     }
     match = path.match(/^\/api\/comments\/([^/]+)$/);
@@ -280,13 +304,15 @@ export async function api(request, env, resolveIdentity = null) {
       if (!result.meta.changes) fail(404, '评论不存在或无权删除');
       return json({ ok: true });
     }
-    match = path.match(/^\/api\/photos\/([^/]+)$/);
+    match = path.match(/^\/api\/photos\/([^/]+)(?:\/([^/]+))?$/);
     if (match && method === 'GET') {
+      if (match[2] !== undefined && !/^[0-2]$/.test(match[2])) fail(404, '照片不存在');
       const post = await readablePost(env, match[1], actor.id);
-      if (!post.photo_key || !env.BUCKET) fail(404, '照片不存在');
-      const photo = await env.BUCKET.get(post.photo_key);
+      const metadata = postPhotos(post)[Number(match[2] || 0)];
+      if (!metadata || !env.BUCKET) fail(404, '照片不存在');
+      const photo = await env.BUCKET.get(metadata.key);
       if (!photo) fail(404, '照片不存在');
-      return new Response(photo.body, { headers: { 'Content-Type': post.photo_type, 'Cache-Control': 'private, no-store', 'X-Content-Type-Options': 'nosniff', 'Content-Security-Policy': "default-src 'none'" } });
+      return new Response(photo.body, { headers: { 'Content-Type': metadata.type, 'Cache-Control': 'private, no-store', 'X-Content-Type-Options': 'nosniff', 'Content-Security-Policy': "default-src 'none'" } });
     }
     fail(404, '接口不存在', 'not_found');
   } catch (error) {

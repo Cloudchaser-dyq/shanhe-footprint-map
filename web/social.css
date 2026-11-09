@@ -28,3 +28,16 @@
 @media(max-width:760px){#cityDrawer{position:fixed;inset:12px;max-width:none;width:auto;max-height:calc(100dvh - 24px);z-index:60;border-radius:12px}.social-drawer-head{padding:18px 20px 15px}.social-drawer-scroll{padding:17px 18px}.social-drawer-head h2{font-size:25px}.social-post-photo{max-height:50vh}.social-person-actions .social-button{padding:6px}.social-section{padding-top:16px}}
 @media(prefers-reduced-motion:reduce){.social-button{transition:none}}
 .social-more-posts{text-align:center;padding:8px 0 16px}.social-more-posts>.social-button{width:100%}.social-history-end{text-align:center;padding:8px}
+.social-photo-count{font-size:10px;line-height:1.6;color:var(--social-muted);margin:8px 0 0}
+.social-photo-label.is-disabled{opacity:.6;cursor:default}
+.social-photo-preview{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:7px;background:transparent;overflow:visible}
+.social-photo-item{position:relative;min-width:0;background:#eef0e7;border-radius:7px;overflow:hidden}
+.social-photo-item img{width:100%;aspect-ratio:1;object-fit:cover}
+.social-photo-item small{font-size:9px;padding:5px 6px}
+.social-photo-item .social-photo-remove{right:4px;top:4px;width:26px;height:26px;padding:0;border-radius:50%;font-size:19px;line-height:1}
+.social-photo-preview .social-loading{grid-column:1/-1;padding:16px 8px;background:#eef0e7;border-radius:7px}
+.social-post-gallery{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:6px}
+.social-post-gallery[data-count="1"]{grid-template-columns:1fr}
+.social-post-gallery[data-count="3"]{grid-template-columns:repeat(3,minmax(0,1fr))}
+.social-post-gallery:not([data-count="1"]) .social-post-photo{height:100%;aspect-ratio:1;object-fit:cover}
+.social-post-photo-link:focus-visible,.social-button:focus-visible{outline:2px solid #809f81;outline-offset:3px}

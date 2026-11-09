@@ -33,16 +33,24 @@ test('real local HTTP serves assets, persists native accounts and photos, and bl
     const me = await request('/api/me', { cookie }); assert.equal(me.status, 200);
     assert.equal((await me.json()).user.name, 'local_test');
     const form = new FormData(); form.set('city', '320500'); form.set('text', '真实 HTTP 上传测试'); form.set('visibility', 'public');
-    form.set('photo', new Blob([new Uint8Array([137,80,78,71,13,10,26,10,0,1])], { type: 'image/png' }), 'test.png');
+    const image = new Blob([new Uint8Array([137,80,78,71,13,10,26,10,0,1])], { type: 'image/png' });
+    for (let index = 0; index < 3; index++) form.append('photo', image, `test-${index}.png`);
     const posted = await request('/api/posts', { form, cookie }); assert.equal(posted.status, 201);
     const post = (await posted.json()).post;
+    assert.equal(post.photos.length, 3);
     assert.equal((await request(post.photoUrl)).status, 200);
-    assert.equal(readdirSync(resolve(dataDir, 'photos')).length, 1);
+    for (const photo of post.photos) assert.equal((await request(photo.url)).status, 200);
+    form.append('photo', image, 'fourth.png');
+    const rejected = await request('/api/posts', { form, cookie });
+    assert.equal(rejected.status, 400);
+    assert.equal((await rejected.json()).code, 'too_many_photos');
+    assert.equal(readdirSync(resolve(dataDir, 'photos')).length, 3);
     const previousPort = Number(new URL(base).port);
     await instance.close();
     instance = await startDevServer({ port: previousPort, dataDir, quiet: true }); base = instance.url;
     assert.equal((await request('/api/me', { cookie })).status, 200);
     assert.equal((await request(post.photoUrl)).status, 200);
+    for (const photo of post.photos) assert.equal((await request(photo.url)).status, 200);
   } finally {
     await instance.close();
     // Only the uniquely-created test directory is removed; guard its absolute scope.

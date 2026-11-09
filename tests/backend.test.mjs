@@ -20,6 +20,7 @@ beforeEach(() => {
   sqlite = new DatabaseSync(':memory:');
   sqlite.exec('PRAGMA foreign_keys = ON');
   sqlite.exec(readFileSync(new URL('../migrations/0001.sql', import.meta.url), 'utf8'));
+  sqlite.exec(readFileSync(new URL('../migrations/0002_post_photos.sql', import.meta.url), 'utf8'));
   const photos = new Map();
   env = {
     DB: { prepare, async batch(statements) {
@@ -64,6 +65,17 @@ async function createPost(actor = 'alice', visibility = 'friends', photo = false
   form.set('city', '320500'); form.set('text', '苏州的一次日落'); form.set('visibility', visibility);
   if (photo) form.set('photo', new Blob([new Uint8Array([137,80,78,71,13,10,26,10,0,1])], { type: 'image/png' }), 'sunset.png');
   return req('/api/posts', actor, 'POST', form);
+}
+const photoBytes = [
+  new Uint8Array([137,80,78,71,13,10,26,10,0,1]),
+  new Uint8Array([255,216,255,0,2]),
+  new Uint8Array([82,73,70,70,0,0,0,0,87,69,66,80,3])
+];
+function photoForm(count = 3, visibility = 'public') {
+  const form = new FormData();
+  form.set('city', '320500'); form.set('text', '一座城市，三个瞬间'); form.set('visibility', visibility);
+  for (let i = 0; i < count; i++) form.append('photo', new Blob([photoBytes[i % 3]], { type: ['image/png','image/jpeg','image/webp'][i % 3] }), `trip-${i}`);
+  return form;
 }
 
 test('authentication is verified by injected adapter and unauthenticated access cannot create users', async () => {
@@ -196,4 +208,96 @@ test('state rejects reserved layer IDs and unknown map regions before touching s
   assert.equal((await req('/api/state', 'alice', 'PUT', { state: reserved, revision: 1 })).status, 400);
   assert.equal((await req('/api/me')).data.revision, 1);
   assert.equal((await req('/api/posts?city=999999', null)).status, 400);
+});
+
+test('three photos retain upload order, MIME types and the legacy first-photo URL', async () => {
+  const created = await req('/api/posts', 'alice', 'POST', photoForm());
+  assert.equal(created.status, 201);
+  const post = created.data.post;
+  assert.equal(post.photos.length, 3);
+  assert.equal(post.photoUrl, `/api/photos/${post.id}`);
+  for (let i = 0; i < 3; i++) {
+    assert.deepEqual(post.photos[i], { url: `/api/photos/${post.id}/${i}` });
+    const result = await req(post.photos[i].url, null);
+    assert.equal(result.status, 200);
+    assert.deepEqual(new Uint8Array(result.data), photoBytes[i]);
+    assert.equal(result.response.headers.get('content-type'), ['image/png','image/jpeg','image/webp'][i]);
+  }
+  assert.deepEqual(new Uint8Array((await req(post.photoUrl, null)).data), photoBytes[0]);
+  assert.equal((await req(`/api/photos/${post.id}/3`, null)).status, 404);
+  assert.equal((await req(`/api/photos/${post.id}/-1`, null)).status, 404);
+  assert.equal((await req('/api/posts?city=320500', null)).data.posts[0].photos.length, 3);
+  assert.equal((await createPost('alice', 'public', false)).data.post.photos.length, 0);
+});
+
+test('server rejects four photos, invalid later images and individually oversized images without uploading', async () => {
+  const four = await req('/api/posts', 'alice', 'POST', photoForm(4));
+  assert.equal(four.status, 400); assert.equal(four.data.code, 'too_many_photos');
+  const invalid = photoForm(2);
+  invalid.append('photo', new Blob(['<svg onload=alert(1)>'], { type: 'image/png' }), 'fake.png');
+  assert.equal((await req('/api/posts', 'alice', 'POST', invalid)).status, 400);
+  const oversized = photoForm(2);
+  oversized.append('photo', new Blob([new Uint8Array(5 * 1024 * 1024 + 1)], { type: 'image/png' }), 'large.png');
+  assert.equal((await req('/api/posts', 'alice', 'POST', oversized)).status, 413);
+  assert.equal(env.BUCKET.photos.size, 0);
+  assert.equal(sqlite.prepare('SELECT COUNT(*) AS count FROM posts').get().count, 0);
+});
+
+test('every image in a friends-only record uses the record authorization, including after unfriend', async () => {
+  const post = (await req('/api/posts', 'alice', 'POST', photoForm(3, 'friends'))).data.post;
+  const urls = [post.photoUrl, ...post.photos.map(photo => photo.url)];
+  for (const url of urls) {
+    assert.equal((await req(url, 'bob')).status, 404);
+    assert.equal((await req(url, null)).status, 404);
+  }
+  await befriend();
+  for (const url of urls) assert.equal((await req(url, 'bob')).status, 200);
+  await req('/api/friends/alice', 'bob', 'DELETE');
+  for (const url of urls) assert.equal((await req(url, 'bob')).status, 404);
+  assert.equal((await req(`/api/posts/${post.id}`, 'alice', 'DELETE')).status, 200);
+  assert.equal(env.BUCKET.photos.size, 0);
+  for (const url of urls) assert.equal((await req(url, 'alice')).status, 404);
+});
+
+test('partially failed uploads and failed database writes clean up every attempted photo', async () => {
+  const put = env.BUCKET.put;
+  let attempted = 0;
+  env.BUCKET.put = async (...args) => { await put(...args); if (++attempted === 2) throw new Error('injected storage failure'); };
+  assert.equal((await req('/api/posts', 'alice', 'POST', photoForm())).status, 500);
+  assert.equal(env.BUCKET.photos.size, 0);
+  assert.equal(sqlite.prepare('SELECT COUNT(*) AS count FROM posts').get().count, 0);
+  env.BUCKET.put = put;
+  sqlite.exec("CREATE TRIGGER reject_post BEFORE INSERT ON posts BEGIN SELECT RAISE(ABORT, 'injected database failure'); END");
+  assert.equal((await req('/api/posts', 'alice', 'POST', photoForm())).status, 500);
+  assert.equal(env.BUCKET.photos.size, 0);
+  assert.equal(sqlite.prepare('SELECT COUNT(*) AS count FROM posts').get().count, 0);
+});
+
+test('legacy single-photo rows remain readable through both URL forms and delete their original object', async () => {
+  await req('/api/me');
+  await env.BUCKET.put('photos/legacy-post', photoBytes[0]);
+  sqlite.prepare("INSERT INTO posts(id,city,author_id,text,photo_key,photo_type,visibility,created_at) VALUES('legacy-post','320500','alice','旧记录','photos/legacy-post','image/png','public','2026-11-09T12:00:00Z')").run();
+  const post = (await req('/api/posts?city=320500', null)).data.posts[0];
+  assert.equal(post.photos.length, 1); assert.equal(post.photoUrl, '/api/photos/legacy-post');
+  assert.equal((await req(post.photoUrl, null)).status, 200);
+  assert.equal((await req(post.photos[0].url, null)).status, 200);
+  assert.equal((await req('/api/photos/legacy-post/1', null)).status, 404);
+  assert.equal((await req('/api/posts/legacy-post', 'alice', 'DELETE')).status, 200);
+  assert.equal(env.BUCKET.photos.size, 0);
+});
+
+test('additive photo migrations preserve existing rows in local and deployment schemas', () => {
+  for (const [initial, added] of [
+    ['../migrations/0001.sql', '../migrations/0002_post_photos.sql'],
+    ['../drizzle/0000_deep_cannonball.sql', '../drizzle/0001_post_photos.sql']
+  ]) {
+    const database = new DatabaseSync(':memory:');
+    try {
+      database.exec(readFileSync(new URL(initial, import.meta.url), 'utf8'));
+      database.exec("INSERT INTO users VALUES('legacy','旧用户','legacycode','2026-11-01'); INSERT INTO posts(id,city,author_id,text,photo_key,photo_type,visibility,created_at) VALUES('p','320500','legacy','保留记录','photos/p','image/png','public','2026-11-01')");
+      database.exec(readFileSync(new URL(added, import.meta.url), 'utf8'));
+      const row = database.prepare('SELECT text,photo_key,photos_json FROM posts WHERE id=?').get('p');
+      assert.equal(row.text, '保留记录'); assert.equal(row.photo_key, 'photos/p'); assert.equal(row.photos_json, null);
+    } finally { database.close(); }
+  }
 });

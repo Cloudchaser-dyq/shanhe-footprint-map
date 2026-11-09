@@ -38,6 +38,7 @@ export const posts = sqliteTable('posts', {
   text: text('text').notNull(),
   photoKey: text('photo_key'),
   photoType: text('photo_type'),
+  photosJson: text('photos_json'),
   visibility: text('visibility').notNull(),
   createdAt: text('created_at').notNull()
 }, table => [
