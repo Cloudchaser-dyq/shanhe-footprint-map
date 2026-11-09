@@ -1,4 +1,5 @@
 import {mountCityPicker} from './city-picker.js';
+import {compareFootprints} from './friend-comparison.js';
 
 const $ = (id) => document.getElementById(id);
 const MAX_PHOTOS = 3;
@@ -6,7 +7,6 @@ const escapeHTML = (value) => String(value ?? '').replace(/[&<>"']/g, (c) => ({'
 const jsonOptions = (method, body) => ({method, headers:{'Content-Type':'application/json'}, body:JSON.stringify(body)});
 const codePath = (value) => encodeURIComponent(String(value));
 const initials = (name) => Array.from(String(name || '旅人')).slice(0, 1).join('');
-const visitedCodes = (state) => new Set((state?.layers || []).filter((layer) => layer.visited).flatMap((layer) => layer.codes || []));
 const timeLabel = (value) => {
   const date = new Date(typeof value === 'number' && value < 1e12 ? value * 1000 : value);
   return Number.isNaN(date.getTime()) ? '' : date.toLocaleString('zh-CN',{month:'numeric',day:'numeric',hour:'2-digit',minute:'2-digit',hour12:false});
@@ -26,6 +26,8 @@ export function initSocial(app) {
   let friendsGeneration = 0;
   let comparisonGeneration = 0;
   let comparison = null;
+  let selectedFriendIds = [];
+  let compareOperation = 'intersection';
   let posts = [];
   let nextBefore = null;
   let loadedOlder = false;
@@ -41,6 +43,7 @@ export function initSocial(app) {
   let lastUserId = app.getUser?.()?.id || null;
   const cityDrafts = new Map();
   const timers = new Set();
+  const buttonRuns = new WeakMap();
   const accountUser = () => app.getUser?.() || null;
   const signedIn = () => !!accountUser()?.id;
   const signIn = '<button type="button" class="social-signin" data-action="sign-in">登录 / 创建账号</button>';
@@ -50,12 +53,21 @@ export function initSocial(app) {
   };
   const runButton = async (element, operation) => {
     if (!element || element.disabled) return;
+    const run = {label:buttonRuns.get(element)?.label || element.textContent};
+    buttonRuns.set(element,run);
     element.disabled = true;
-    const label = element.textContent;
     element.textContent = '处理中…';
     try { await operation(); }
     catch (error) { app.notify(errorLabel(error)); }
-    finally { if (element.isConnected) { element.disabled = false; element.textContent = label; } }
+    finally {
+      if (buttonRuns.get(element) === run) {
+        buttonRuns.delete(element);
+        if (element.isConnected) {
+          element.disabled = element.dataset.action === 'compare' && selectedFriendIds.length === 0;
+          element.textContent = run.label;
+        }
+      }
+    }
   };
 
   function renderFriends() {
@@ -65,12 +77,37 @@ export function initSocial(app) {
     }
     const user = accountUser();
     const oldCode = friendsPanel.querySelector('[name="friendCode"]')?.value || '';
-    friendsPanel.innerHTML = `<section class="social-section"><div class="social-section-head"><h2>我的好友</h2>${button('刷新','refresh-friends','','social-subtle')}</div><div class="social-invite"><div><span class="social-label">我的好友码</span><strong>${escapeHTML(user.code || '加载中')}</strong></div>${button('复制','copy-code')}</div><form id="friendRequestForm" class="social-inline-form"><label class="sr-only" for="friendCodeInput">对方的好友码</label><input id="friendCodeInput" name="friendCode" value="${escapeHTML(oldCode)}" maxlength="32" autocomplete="off" placeholder="输入对方的好友码" required><button type="submit" class="social-button social-primary">添加</button></form><p class="social-help">对方同意后，就能互看足迹和好友可见的城市记录。</p><p id="friendError" class="social-error" role="alert" hidden></p><div id="friendRequests"></div><div id="friendList"></div></section><section class="social-section social-compare"><span class="social-kicker">FOOTPRINTS TOGETHER</span><h2>和好友比一比</h2><p class="social-help">按双方标记为「去过」的图层计算，不受图层显示开关影响。</p><label class="social-field"><span>选择好友</span><select id="compareFriend"><option value="">请选择一位好友</option>${friendsData.friends.map((friend) => `<option value="${escapeHTML(friend.id)}"${comparison?.friendId === friend.id ? ' selected' : ''}>${escapeHTML(friend.name)}</option>`).join('')}</select></label><label class="social-field"><span>比较方式</span><select id="compareOperation"><option value="intersection">共同去过 · 交集</option><option value="union">两人去过 · 并集</option><option value="mine">只有我去过 · 差集</option><option value="theirs">只有好友去过 · 差集</option><option value="neither">都没去过 · 并集的补集</option></select></label><div class="social-actions">${button('在地图上查看','compare','','social-primary')}${button('退出比较','clear-comparison','','social-subtle')}</div><div id="comparisonResult" aria-live="polite"></div></section>`;
-    if (comparison) {
-      $('compareOperation').value = comparison.operation;
-      renderComparisonResult();
-    }
+    friendsPanel.innerHTML = `<section class="social-section"><div class="social-section-head"><h2>我的好友</h2>${button('刷新','refresh-friends','','social-subtle')}</div><div class="social-invite"><div><span class="social-label">我的好友码</span><strong>${escapeHTML(user.code || '加载中')}</strong></div>${button('复制','copy-code')}</div><form id="friendRequestForm" class="social-inline-form"><label class="sr-only" for="friendCodeInput">对方的好友码</label><input id="friendCodeInput" name="friendCode" value="${escapeHTML(oldCode)}" maxlength="32" autocomplete="off" placeholder="输入对方的好友码" required><button type="submit" class="social-button social-primary">添加</button></form><p class="social-help">对方同意后，就能互看足迹和好友可见的城市记录。</p><p id="friendError" class="social-error" role="alert" hidden></p><div id="friendRequests"></div><div id="friendList"></div></section><section class="social-section social-compare"><span class="social-kicker">FOOTPRINTS TOGETHER</span><h2>和好友比一比</h2><p class="social-help">选 1–3 位好友，比较你们的足迹。按每个人标记为「去过」的图层计算，不受显示开关影响。</p><div id="comparePicker"></div><div class="social-actions">${button('在地图上查看','compare','','social-primary')}${button('退出比较','clear-comparison','','social-subtle')}</div><div id="comparisonResult" aria-live="polite"></div></section>`;
+    renderComparisonPicker();
+    if (comparison) renderComparisonResult();
     renderFriendLists();
+  }
+
+  function renderComparisonPicker() {
+    const root = $('comparePicker');
+    if (!root) return;
+    const focusedId = document.activeElement?.dataset?.compareFriend;
+    const count = selectedFriendIds.length;
+    const atLimit = count >= 3;
+    root.innerHTML = `<fieldset class="social-friend-picker"><legend>选择好友 <span>${count} / 3</span></legend><div class="social-friend-options">${friendsData.friends.length ? friendsData.friends.map((friend) => {
+      const selected = selectedFriendIds.includes(friend.id);
+      return `<label class="social-friend-option${selected ? ' is-selected' : ''}${atLimit && !selected ? ' is-unavailable' : ''}"><input type="checkbox" data-compare-friend="${escapeHTML(friend.id)}"${selected ? ' checked' : ''}${atLimit && !selected ? ' disabled' : ''}><span>${escapeHTML(friend.name)}</span></label>`;
+    }).join('') : '<p class="social-help">添加好友后，就能在这里选择一起比较的人。</p>'}</div><p class="social-help social-selection-hint" role="status">${atLimit ? '已选 3 位；取消一位后可以换选。' : '可选择 1–3 位好友，比较包含你自己的足迹。'}</p></fieldset><label class="social-field"><span>查看 / 比较方式</span><select id="compareOperation"><option value="friend"${count !== 1 ? ' disabled' : ''}>查看好友去过的地方（选 1 位）</option><option value="intersection">我们都去过 · 全员交集</option><option value="union">我们有人去过 · 全员并集</option><option value="mine">只有我去过 · 好友均未去过</option><option value="theirs">${count > 1 ? '仅好友去过 · 我未去过' : '只有好友去过 · 我未去过'}</option><option value="neither">我们都未去过 · 全员补集</option></select></label><p id="compareExplanation" class="social-help">${comparisonExplanation(compareOperation, count)}</p>`;
+    $('compareOperation').value = compareOperation;
+    const compareButton = friendsPanel.querySelector('[data-action="compare"]');
+    if (compareButton) compareButton.disabled = count < 1;
+    if (focusedId) [...root.querySelectorAll('[data-compare-friend]')].find((input) => input.dataset.compareFriend === focusedId)?.focus();
+  }
+
+  function comparisonExplanation(operation, count) {
+    return {
+      friend:'只展示这位好友去过的地方，不加入我的足迹。',
+      intersection:'我和每一位所选好友都去过，才计入结果。',
+      union:'我或任意一位所选好友去过，就计入结果。',
+      mine:'我去过，且每一位所选好友都没有去过。',
+      theirs:count > 1 ? '至少一位所选好友去过，且我没有去过。' : '这位好友去过，且我没有去过。',
+      neither:'我和每一位所选好友都没有去过。'
+    }[operation] || '';
   }
 
   function renderFriendLists() {
@@ -78,7 +115,7 @@ export function initSocial(app) {
     const listRoot = $('friendList');
     if (!requestRoot || !listRoot) return;
     requestRoot.innerHTML = friendsData.incoming.length || friendsData.outgoing.length ? `<div class="social-request-group"><h3>好友申请</h3>${friendsData.incoming.map((request) => `<div class="social-person"><span class="social-avatar">${escapeHTML(initials(request.from?.name))}</span><div class="social-person-body"><strong>${escapeHTML(request.from?.name || '旅人')}</strong><small>想和你一起记录旅程</small></div><div class="social-person-actions">${button('同意','accept-friend',request.id,'social-primary')}${button('忽略','remove-request',request.id,'social-subtle')}</div></div>`).join('')}${friendsData.outgoing.map((request) => `<div class="social-person"><span class="social-avatar">${escapeHTML(initials(request.to?.name))}</span><div class="social-person-body"><strong>${escapeHTML(request.to?.name || '旅人')}</strong><small>等待对方同意</small></div>${button('撤回','remove-request',request.id,'social-subtle')}</div>`).join('')}</div>` : '';
-    listRoot.innerHTML = friendsData.friends.length ? `<p class="social-list-caption">${friendsData.friends.length} 位同行的人</p>${friendsData.friends.map((friend) => `<div class="social-person"><span class="social-avatar">${escapeHTML(initials(friend.name))}</span><div class="social-person-body"><strong>${escapeHTML(friend.name)}</strong><small>${escapeHTML(friend.code || '')}</small></div>${button('比较','choose-friend',friend.id)}${button('移除','remove-friend',friend.id,'social-subtle')}</div>`).join('')}` : `<div class="social-empty"><span>两个人的地图，会是什么样？</span><p>把好友码发给朋友，或输入对方的好友码，开始第一段共同旅程。</p></div>`;
+    listRoot.innerHTML = friendsData.friends.length ? `<p class="social-list-caption">${friendsData.friends.length} 位同行的人</p>${friendsData.friends.map((friend) => `<div class="social-person"><span class="social-avatar">${escapeHTML(initials(friend.name))}</span><div class="social-person-body"><strong>${escapeHTML(friend.name)}</strong><small>${escapeHTML(friend.code || '')}</small></div>${button('查看足迹','view-friend',friend.id)}${button('移除','remove-friend',friend.id,'social-subtle')}</div>`).join('')}` : `<div class="social-empty"><span>两个人的地图，会是什么样？</span><p>把好友码发给朋友，或输入对方的好友码，开始第一段共同旅程。</p></div>`;
   }
 
   async function refreshFriends({quiet = false} = {}) {
@@ -91,14 +128,16 @@ export function initSocial(app) {
       const data = await app.api('/api/friends');
       if (destroyed || generation !== friendsGeneration || accountUser()?.id !== userId) return;
       friendsData = {friends:data.friends || [],incoming:data.incoming || [],outgoing:data.outgoing || []};
-      const selected = $('compareFriend')?.value;
+      const validIds = new Set(friendsData.friends.map((friend) => friend.id));
+      const selectionRemoved = selectedFriendIds.some((id) => !validIds.has(id));
+      selectedFriendIds = selectedFriendIds.filter((id) => validIds.has(id));
+      if (compareOperation === 'friend' && selectedFriendIds.length !== 1) compareOperation = 'intersection';
       renderFriendLists();
-      const selector = $('compareFriend');
-      if (selector) {
-        selector.innerHTML = `<option value="">请选择一位好友</option>${friendsData.friends.map((friend) => `<option value="${escapeHTML(friend.id)}">${escapeHTML(friend.name)}</option>`).join('')}`;
-        if (friendsData.friends.some((friend) => friend.id === selected)) selector.value = selected;
+      renderComparisonPicker();
+      if (selectionRemoved || comparison?.friends.some((friend) => !validIds.has(friend.id))) {
+        clearComparison();
+        showError($('friendError'),'好友关系已变化，请重新选择后查看。');
       }
-      if (comparison && !friendsData.friends.some((friend) => friend.id === comparison.friendId)) clearComparison();
     } catch (error) {
       if (generation === friendsGeneration && !destroyed) showError($('friendError'), errorLabel(error));
     } finally { if (generation === friendsGeneration) friendsLoading = false; }
@@ -106,36 +145,69 @@ export function initSocial(app) {
 
   function calculateComparison() {
     if (!comparison) return [];
-    const mine = visitedCodes(app.getState());
-    const theirs = visitedCodes(comparison.friendState);
-    return app.getCities().filter((city) => {
-      const a = mine.has(city.code), b = theirs.has(city.code);
-      if (comparison.operation === 'intersection') return a && b;
-      if (comparison.operation === 'union') return a || b;
-      if (comparison.operation === 'mine') return a && !b;
-      if (comparison.operation === 'theirs') return b && !a;
-      return !a && !b;
-    });
+    return compareFootprints(app.getState(),comparison.friends.map((friend) => friend.state),app.getCities(),comparison.operation);
   }
 
   function renderComparisonResult() {
     if (!comparison) return;
     const matching = calculateComparison();
-    const label = {intersection:'共同去过',union:'两人去过',mine:'只有我去过',theirs:'只有好友去过',neither:'都没去过'}[comparison.operation];
+    const label = {friend:'好友去过',intersection:'我们都去过',union:'我们有人去过',mine:'只有我去过',theirs:comparison.friends.length > 1 ? '仅好友去过' : '只有好友去过',neither:'我们都未去过'}[comparison.operation];
+    const names = comparison.friends.map((friend) => friend.name).join('、');
+    const participants = comparison.operation === 'friend' ? names : `我、${names}`;
     const resultRoot = $('comparisonResult');
-    if (resultRoot) resultRoot.innerHTML = `<div class="social-result-count"><strong>${matching.length}</strong><span>${escapeHTML(label)}的行政区</span></div><p class="social-help">我 × ${escapeHTML(comparison.friendName)} · 范围为本地图全部 ${app.getCities().length} 个可填色行政区</p>${matching.length ? `<div class="social-city-chips">${matching.map((city) => button(escapeHTML(city.name),'open-city',city.code,'social-city-chip')).join('')}</div>` : '<p class="social-help">这个组合暂时没有符合的地方。</p>'}`;
-    app.previewComparison({codes:matching.map((city) => city.code),title:`我 × ${comparison.friendName} · ${label}`});
+    if (resultRoot) resultRoot.innerHTML = `<div class="social-result-count"><strong>${matching.length}</strong><span>${escapeHTML(label)}的行政区</span></div><p class="social-help social-comparison-people">${escapeHTML(participants)}</p><p class="social-help">${comparisonExplanation(comparison.operation,comparison.friends.length)}范围为本地图全部 ${app.getCities().length} 个可填色行政区。</p>${matching.length ? `<div class="social-city-chips">${matching.map((city) => button(escapeHTML(city.name),'open-city',city.code,'social-city-chip')).join('')}</div>` : '<p class="social-help">这个组合暂时没有符合的地方。</p>'}`;
+    app.previewComparison({codes:matching.map((city) => city.code),title:`${participants} · ${label}`});
   }
 
   async function compareFriend() {
-    const friendId = $('compareFriend')?.value;
-    const operation = $('compareOperation')?.value || 'intersection';
-    if (!friendId) { app.notify('先选择一位好友。'); return; }
+    const friendIds = [...new Set(selectedFriendIds)];
+    const operation = compareOperation;
+    const userId = accountUser()?.id;
+    if (!userId) { app.openAuth(); return; }
+    if (friendIds.length < 1 || friendIds.length > 3) { app.notify('请选择 1–3 位好友。'); return; }
+    if (operation === 'friend' && friendIds.length !== 1) { app.notify('直接查看足迹时，请选择一位好友。'); return; }
+    if (friendIds.some((id) => !friendsData.friends.some((friend) => friend.id === id))) { clearComparison(); await refreshFriends(); return; }
+    clearComparison();
     const generation = ++comparisonGeneration;
-    const data = await app.api(`/api/friends/${codePath(friendId)}/state`);
-    if (generation !== comparisonGeneration || destroyed) return;
-    comparison = {friendId,friendName:data.user?.name || friendsData.friends.find((friend) => friend.id === friendId)?.name || '好友',friendState:data.state,operation};
-    renderComparisonResult();
+    const current = () => generation === comparisonGeneration && !destroyed && accountUser()?.id === userId;
+    if ($('comparisonResult')) $('comparisonResult').innerHTML = '<p class="social-loading" role="status">正在读取所选好友的足迹…</p>';
+    try {
+      const results = await Promise.all(friendIds.map(async (id) => {
+        const data = await app.api(`/api/friends/${codePath(id)}/state`);
+        return {id,name:data.user?.name || friendsData.friends.find((friend) => friend.id === id)?.name || '好友',state:data.state};
+      }));
+      if (!current()) return;
+      comparison = {friends:results,operation};
+      renderComparisonResult();
+    } catch (error) {
+      if (!current()) return;
+      $('comparisonResult')?.replaceChildren();
+      if (error.status === 403 || error.status === 404) {
+        clearComparison();
+        await refreshFriends();
+      }
+      throw error;
+    }
+  }
+
+  function handleFriendsChange(event) {
+    const target = event.target;
+    if (target.dataset?.compareFriend) {
+      const id = target.dataset.compareFriend;
+      if (!friendsData.friends.some((friend) => friend.id === id)) { target.checked = false; return; }
+      if (target.checked && !selectedFriendIds.includes(id)) {
+        if (selectedFriendIds.length >= 3) { target.checked = false; app.notify('最多选择 3 位好友，先取消一位即可换选。'); return; }
+        selectedFriendIds = [...selectedFriendIds,id];
+      } else if (!target.checked) selectedFriendIds = selectedFriendIds.filter((friendId) => friendId !== id);
+      if (compareOperation === 'friend' && selectedFriendIds.length !== 1) compareOperation = 'intersection';
+      clearComparison();
+      renderComparisonPicker();
+    } else if (target.id === 'compareOperation') {
+      compareOperation = target.value;
+      clearComparison();
+      const help = $('compareExplanation');
+      if (help) help.textContent = comparisonExplanation(compareOperation,selectedFriendIds.length);
+    }
   }
 
   function clearComparison() {
@@ -407,8 +479,27 @@ export function initSocial(app) {
     else if (action === 'remove-friend') {
       const friend = friendsData.friends.find((item) => item.id === id);
       if (!window.confirm(`移除好友「${friend?.name || '这位旅人'}」？双方将无法查看彼此的好友可见记录。`)) return;
-      await runButton(target,async () => { await app.api(`/api/friends/${codePath(id)}`,{method:'DELETE'}); await refreshFriends(); app.notify('已移除好友。'); });
-    } else if (action === 'choose-friend') { $('compareFriend').value = id; await runButton(target,compareFriend); }
+      await runButton(target,async () => {
+        await app.api(`/api/friends/${codePath(id)}`,{method:'DELETE'});
+        const affectsComparison = selectedFriendIds.includes(id) || comparison?.friends.some((friend) => friend.id === id);
+        friendsData.friends = friendsData.friends.filter((friend) => friend.id !== id);
+        selectedFriendIds = selectedFriendIds.filter((friendId) => friendId !== id);
+        if (compareOperation === 'friend' && selectedFriendIds.length !== 1) compareOperation = 'intersection';
+        if (affectsComparison) clearComparison();
+        friendsGeneration++;
+        friendsLoading = false;
+        renderFriendLists();
+        renderComparisonPicker();
+        await refreshFriends();
+        app.notify('已移除好友。');
+      });
+    } else if (action === 'view-friend') {
+      if (!friendsData.friends.some((friend) => friend.id === id)) { await refreshFriends(); return; }
+      selectedFriendIds = [id];
+      compareOperation = 'friend';
+      renderComparisonPicker();
+      await runButton(target,compareFriend);
+    }
     else if (action === 'compare') await runButton(target,compareFriend);
     else if (action === 'clear-comparison') clearComparison();
     else if (action === 'open-city') openCity(id);
@@ -489,7 +580,7 @@ export function initSocial(app) {
   function handleEscape(event) { if (event.key === 'Escape' && activeCity) closeDrawer(); }
   function accountReady() {
     const currentUserId = accountUser()?.id || null;
-    if (currentUserId !== lastUserId) { cityDrafts.clear(); clearPhoto(); }
+    if (currentUserId !== lastUserId) { cityDrafts.clear(); clearPhoto(); selectedFriendIds = []; compareOperation = 'intersection'; }
     else saveCityDraft();
     lastUserId = currentUserId;
     friendsGeneration++;
@@ -511,6 +602,7 @@ export function initSocial(app) {
   }
   friendsPanel.addEventListener('click',handleFriendsClick);
   friendsPanel.addEventListener('submit',handleFriendsSubmit);
+  friendsPanel.addEventListener('change',handleFriendsChange);
   drawer.addEventListener('click',handleDrawerClick);
   drawer.addEventListener('submit',handleDrawerSubmit);
   drawer.addEventListener('change',handleDrawerChange);
@@ -543,6 +635,7 @@ export function initSocial(app) {
       timers.forEach(clearInterval);
       friendsPanel.removeEventListener('click',handleFriendsClick);
       friendsPanel.removeEventListener('submit',handleFriendsSubmit);
+      friendsPanel.removeEventListener('change',handleFriendsChange);
       drawer.removeEventListener('click',handleDrawerClick);
       drawer.removeEventListener('submit',handleDrawerSubmit);
       drawer.removeEventListener('change',handleDrawerChange);
