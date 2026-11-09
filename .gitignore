@@ -1,0 +1,9 @@
+node_modules/
+dist/
+.task-tmp/
+worker/generated-assets.mjs
+.env
+.dev.vars
+*.tar.gz
+*.zip
+outputs/
