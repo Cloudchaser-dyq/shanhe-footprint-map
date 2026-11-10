@@ -1,12 +1,11 @@
 import { mkdir, writeFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
+import { codeOf, selectProvinceRegions, usesProvinceOutline } from './map-regions.mjs';
 
-// Preserve the source page's region selection and Mercator projection.
+// Keep the Mercator projection and include all province-level child polygons.
 const BASE = 'https://geo.datav.aliyun.com/areas_v3/bound/';
 const WIDTH = 1200, HEIGHT = 820, PAD = 24;
-const SPECIAL = new Set(['110000', '120000', '310000', '500000', '710000', '810000', '820000']);
-const codeOf = feature => String(feature.properties?.adcode ?? feature.properties?.code ?? '');
 const nameOf = feature => String(feature.properties?.name ?? feature.properties?.NAME ?? codeOf(feature));
 
 async function fetchJson(code) {
@@ -47,16 +46,8 @@ await Promise.all(Array.from({length: 5}, async () => {
   while (queue.length) {
     const province = queue.shift();
     const pcode = codeOf(province);
-    if (SPECIAL.has(pcode)) output.push(province);
-    else {
-      const data = await fetchJson(pcode);
-      const children = data.features.filter(f => {
-        const code = codeOf(f);
-        return code.length === 6 && code.endsWith('00') && code !== pcode;
-      });
-      if (!children.length) throw new Error(`No prefecture-level children for ${pcode} ${nameOf(province)}; refusing a province fallback.`);
-      output.push(...children);
-    }
+    const children = usesProvinceOutline(pcode) ? null : await fetchJson(pcode);
+    output.push(...selectProvinceRegions(province, children));
     console.log(`${++completed}/${administrativeProvinces.length} ${pcode} ${nameOf(province)}`);
   }
 }));

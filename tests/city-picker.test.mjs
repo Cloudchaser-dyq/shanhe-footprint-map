@@ -6,12 +6,24 @@ import {buildCityIndex, searchCities, recentCityCodes} from '../web/city-picker.
 const map = JSON.parse(await readFile(new URL('../web/map-data.json', import.meta.url), 'utf8'));
 const index = buildCityIndex(map.cities, map.provinces);
 
-test('all 340 map regions belong to a valid province; non-six-digit outline is omitted', () => {
-  assert.equal(index.cities.length, 340);
+test('all 370 map regions belong to a valid province; non-six-digit outline is omitted', () => {
+  assert.equal(index.cities.length, 370);
   assert.equal(index.provinces.length, 34);
-  assert.equal(index.provinces.reduce((sum, province) => sum + province.cities.length, 0), 340);
+  assert.equal(index.provinces.reduce((sum, province) => sum + province.cities.length, 0), 370);
   assert(!index.provinces.some((province) => province.code === '100000_JD'));
   assert(index.byProvince.get('32').cities.some((city) => city.name === '苏州市'));
+});
+
+test('direct-administered regions fill the four affected provinces and remain searchable', () => {
+  for (const [prefix, count] of [['41', 18], ['42', 17], ['46', 19], ['65', 24]]) assert.equal(index.byProvince.get(prefix).cities.length, count);
+  for (const [query, code] of [['济源', '419001'], ['湖北神农架', '429021'], ['仙桃', '429004'], ['海南定安', '469021'], ['琼中', '469030'], ['新疆石河子', '659001'], ['胡杨河', '659010']]) {
+    assert.equal(searchCities(index, query).items[0]?.code, code, query);
+  }
+  for (const region of map.cities) {
+    assert.ok(region.path.startsWith('M') && region.path.endsWith('Z'), region.code);
+    assert.ok(!/NaN|Infinity/.test(region.path), region.code);
+  }
+  assert.equal(new Set(map.cities.map(city => city.code)).size, map.cities.length);
 });
 
 test('municipalities, Hong Kong, Macao and Taiwan retain their selectable map region', () => {
