@@ -32,6 +32,8 @@ test('real local HTTP serves assets, persists native accounts and photos, and bl
     const cookie = registered.headers.get('set-cookie').split(';')[0];
     const me = await request('/api/me', { cookie }); assert.equal(me.status, 200);
     assert.equal((await me.json()).user.name, 'local_test');
+    const savedState = { layers: [{ id: 'visited', name: '原有和补齐的足迹', color: '#218374', visible: true, visited: true, codes: ['320500', '419001', '429021', '469021', '659001'] }], activeLayerId: 'visited', background: '#eaf1ef' };
+    assert.equal((await request('/api/state', { method: 'PUT', body: { state: savedState, revision: 0 }, cookie })).status, 200);
     const form = new FormData(); form.set('city', '320500'); form.set('text', '真实 HTTP 上传测试'); form.set('visibility', 'public');
     const image = new Blob([new Uint8Array([137,80,78,71,13,10,26,10,0,1])], { type: 'image/png' });
     for (let index = 0; index < 3; index++) form.append('photo', image, `test-${index}.png`);
@@ -48,7 +50,9 @@ test('real local HTTP serves assets, persists native accounts and photos, and bl
     const previousPort = Number(new URL(base).port);
     await instance.close();
     instance = await startDevServer({ port: previousPort, dataDir, quiet: true }); base = instance.url;
-    assert.equal((await request('/api/me', { cookie })).status, 200);
+    const persisted = await request('/api/me', { cookie });
+    assert.equal(persisted.status, 200);
+    assert.deepEqual((await persisted.json()).state, savedState);
     assert.equal((await request(post.photoUrl)).status, 200);
     for (const photo of post.photos) assert.equal((await request(photo.url)).status, 200);
   } finally {
